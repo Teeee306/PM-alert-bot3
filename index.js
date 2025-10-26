@@ -1,79 +1,9 @@
-sendMessage(msg.chat.id, "✅ Now tracking London weather markets!");
-  checkWeatherMarket("london");
-});
-
-bot.onText(/\/alert nyc/i, msg => {
-  tracking.nyc = true;
-  bot.sendMessage(msg.chat.id, "✅ Now tracking NYC weather markets!");
-  checkWeatherMarket("nyc");
-});
-
-bot.onText(/\/stop london/i, msg => {
-  tracking.london = false;
-  bot.sendMessage(msg.chat.id, "⏹ Stopped tracking London.");
-});
-
-bot.onText(/\/stop nyc/i, msg => {
-  tracking.nyc = false;
-  bot.sendMessage(msg.chat.id, "⏹ Stopped tracking NYC.");
-});
-
-bot.onText(/\/current london/i, msg => { checkWeatherMarket("london"); });
-bot.onText(/\/current nyc/i, msg => { checkWeatherMarket("nyc"); });
-
-bot.onText(/\/resolve/i, msg => {
-  let messages = [];
-  ["london","nyc"].forEach(station => {
-    if (reportedResolution[station]) messages.push(`${station.toUpperCase()} resolved: ${lastPrices[station].resolved || "Unknown"}`);
-    else messages.push(`${station.toUpperCase()} not resolved yet`);
-  });
-  bot.sendMessage(msg.chat.id, messages.join("\n"));
-});
-
-bot.onText(/\/streak london/i, msg => {
-  if (streaks.london.length === 0) return bot.sendMessage(msg.chat.id, "No streak data yet for London.");
-  let message = "🏆 London top winners (last 2 weeks):\n";
-  streaks.london.forEach(s => message += `${s.date}: ${s.winner}\n`);
-  bot.sendMessage(msg.chat.id, message);
-});
-
-bot.onText(/\/streak nyc/i, msg => {
-  if (streaks.nyc.length === 0) return bot.sendMessage(msg.chat.id, "No streak data yet for NYC.");
-  let message = "🏆 NYC top winners (last 2 weeks):\n";
-  streaks.nyc.forEach(s => message += `${s.date}: ${s.winner}\n`);
-  bot.sendMessage(msg.chat.id, message);
-});
-
-bot.onText(/\/help/i, msg => {
-  const helpMessage = `
-Available commands:
-/alert london - Start tracking London
-/alert nyc - Start tracking NYC
-/stop london - Stop tracking London
-/stop nyc - Stop tracking NYC
-/current london - Show current leading options London
-/current nyc - Show current leading options NYC
-/streak london - Show recent winners streak London
-/streak nyc - Show recent winners streak NYC
-/resolve - Show resolved outcome if available
-/help - Show this menu
-  `;
-  bot.sendMessage(msg.chat.id, helpMessage);
-  sendCommandButtons(msg.chat.id);import fetch from "node-fetch";
+import fetch from "node-fetch";
 import TelegramBot from "node-telegram-bot-api";
-import express from "express";
 
-// Telegram environment variables
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const chatId = process.env.TELEGRAM_CHAT_ID;
-
 const bot = new TelegramBot(token, { polling: true });
-
-// Express for /ping
-const app = express();
-const PORT = process.env.PORT || 3000;
-app.get("/ping", (req, res) => res.send("pong"));
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
 // Polling error handler
 bot.on("polling_error", (err) => {
@@ -84,109 +14,198 @@ bot.on("polling_error", (err) => {
   }
 });
 
-// Tracking states
+// Tracking states per station
 let tracking = { london: false, nyc: false };
-let lastPrices = { london: {}, nyc: {} };
-let reportedResolution = { london: false, nyc: false };
-let streaks = { london: [], nyc: [] };
 
-// Helper: fetch today’s market slug
-async function findLatestWeatherMarket(station) {
+// Store last prices per station
+let lastPrices = { london: {}, nyc: {} };
+
+// Prevent duplicate resolution alerts
+let reportedResolution = { london: false, nyc: false };
+
+// Store current slugs
+let currentSlug = { london: null, nyc: null };
+
+// Fetch latest market slug for a station
+async function updateSlug(station) {
   const res = await fetch("https://gamma-api.polymarket.com/markets");
   const data = await res.json();
 
-  const today = new Date();
-  const day = today.getDate();
-  const monthNames = ["January","February","March","April","May","June","July","August","September","October","November","December"];
-  const month = monthNames[today.getMonth()];
-
   const markets = data.filter(m =>
     m.question.toLowerCase().includes(station.toLowerCase()) &&
-    m.question.includes(`${day}`) &&
-    m.question.includes(month)
+    m.question.toLowerCase().includes("highest temperature")
   );
 
-  markets.sort((a, b) => new Date(b.endDate) - new Date(a.endDate));
-  return markets[0]?.slug;
+  markets.sort((a, b) => new Date(b.endDate  Date.now()) - new Date(a.endDate  Date.now()));
+
+  currentSlug[station] = markets[0]?.slug || null;
+
+  if (currentSlug[station]) console.log(`Updated slug for ${station}: ${currentSlug[station]}`);
+  else console.log(`No market found for ${station} today`);
 }
 
-// Check top 3 price changes
-async function checkWeatherMarket(station) {
-  if (!tracking[station]) return;
+// Initial slug fetch
+["london", "nyc"].forEach(station => updateSlug(station));
 
-  const slug = await findLatestWeatherMarket(station);
-  if (!slug) return;
+// Daily slug refresh at 00:05 local time
+function scheduleDailySlugUpdate() {
+  const now = new Date();
+  const millisTillMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 5, 0, 0) - now;
 
+  setTimeout(() => {
+    ["london", "nyc"].forEach(station => updateSlug(station));
+    scheduleDailySlugUpdate();
+  }, millisTillMidnight);
+}
+
+scheduleDailySlugUpdate();
+
+// Fetch market data for slug
+async function fetchMarket(slug) {
   const res = await fetch(`https://gamma-api.polymarket.com/market/${slug}`);
   const data = await res.json();
+  return data;
+}
+
+// Get top 3 outcomes formatted
+function getTop3(outcomes) {
+  return outcomes
+    .sort((a, b) => b.price - a.price)
+    .slice(0, 3)
+    .map(o => {
+      const percent = (o.price * 100).toFixed(0) + "%";
+      const cents = (o.price).toFixed(2);
+      return ${o.name} • ${percent} (${cents}¢);
+    });
+}
+
+// Check price changes for a station
+async function checkWeatherMarket(station) {
+  if (!tracking[station]) return;
+  const slug = currentSlug[station];
+  if (!slug) return;
+
+  const data = await fetchMarket(slug);
   if (!data.outcomes) return;
 
-  const topOutcomes = data.outcomes
-    .sort((a, b) => b.price - a.price)
-    .slice(0, 3);
-
   let changes = [];
-  topOutcomes.forEach(o => {
-    const { name, price } = o;
-    const percent = (price * 100).toFixed(0) + "%";
-    const cents = (price).toFixed(2);
-
-    const last = lastPrices[station][name];
-    if (last === undefined) {
-      changes.push(`${name} • ${percent} (${cents}¢)`);
-    } else if (last !== price) {
-      const arrow = price > last ? "↑" : "↓";
-      changes.push(`${name} ${arrow} ${percent} (${cents}¢)`);
+  data.outcomes.forEach(o => {
+    const last = lastPrices[station][o.name];
+    if (last !== undefined && last !== o.price) {
+      const arrow = o.price > last ? "↑" : "↓";
+      const percent = (o.price * 100).toFixed(0) + "%";
+      const cents = (o.price).toFixed(2);
+      changes.push(`${o.name} ${arrow} ${percent} (${cents}¢)`);
     }
-    lastPrices[station][name] = price;
+    lastPrices[station][o.name] = o.price;
   });
 
   if (changes.length > 0) {
-    const message = [${station.toUpperCase()}] ${changes.join(", ")};
+    const topChanges = changes.slice(0, 3);
+    const message = [${station.toUpperCase()}] ${topChanges.join(", ")};
     bot.sendMessage(chatId, message);
   }
 
+  // Market resolved alert
   if (data.resolvedOutcome && !reportedResolution[station]) {
     const resolved = data.resolvedOutcome.name;
-    const message = ✅ [${station.toUpperCase()}] Resolved: ${resolved};
+    const message = ✅ [${station.toUpperCase()}] ${data.endDate.slice(0,10)}: ${resolved} (highest temp recorded);
     bot.sendMessage(chatId, message);
     reportedResolution[station] = true;
-    lastPrices[station].resolved = resolved;
-
-    streaks[station].push({ date: new Date().toISOString().slice(0,10), winner: resolved });
-    if (streaks[station].length > 14) streaks[station] = streaks[station].slice(-14);
   }
 }
 
-// Polling every 30s
+// Run both stations every 30 seconds
 setInterval(() => checkWeatherMarket("london"), 30*1000);
 setInterval(() => checkWeatherMarket("nyc"), 30*1000);
 
-// Helper: send clickable buttons
-function sendCommandButtons(chatId) {
-  const opts = {
-    reply_markup: {
-      keyboard: [
-        ["/alert london", "/alert nyc"],
-        ["/stop london", "/stop nyc"],
-        ["/current london", "/current nyc"],
-        ["/streak london", "/streak nyc"],
-        ["/resolve", "/help"]
-      ],
-      resize_keyboard: true,
-      one_time_keyboard: false
-    }
-  };
-  bot.sendMessage(chatId, "Select a command:", opts);
-}
-
-// Commands
+// Telegram commands
 bot.onText(/\/start/, msg => {
-  bot.sendMessage(msg.chat.id, "Hi! Use buttons or type commands to start tracking.");
-  sendCommandButtons(msg.chat.id);
+  const buttons = [
+    [{ text: "/alert london" }, { text: "/alert nyc" }],
+    [{ text: "/stop london" }, { text: "/stop nyc" }],[{ text: "/resolve" }, { text: "/streak london" }, { text: "/streak nyc" }],
+    [{ text: "/help" }]
+  ];
+  bot.sendMessage(msg.chat.id, "Hi! Use the buttons below or type commands:", {
+    reply_markup: { keyboard: buttons, one_time_keyboard: false, resize_keyboard: true }
+  });
 });
 
+// /alert commands
 bot.onText(/\/alert london/i, msg => {
   tracking.london = true;
-  bot.
+  bot.sendMessage(msg.chat.id, "✅ Now tracking London weather markets!");
+  checkWeatherMarket("london");
 });
+bot.onText(/\/alert nyc/i, msg => {
+  tracking.nyc = true;
+  bot.sendMessage(msg.chat.id, "✅ Now tracking NYC weather markets!");
+  checkWeatherMarket("nyc");
+});
+
+// /stop commands
+bot.onText(/\/stop london/i, msg => {
+  tracking.london = false;
+  bot.sendMessage(msg.chat.id, "⏹ Stopped tracking London.");
+});
+bot.onText(/\/stop nyc/i, msg => {
+  tracking.nyc = false;
+  bot.sendMessage(msg.chat.id, "⏹ Stopped tracking NYC.");
+});
+
+// /current commands
+bot.onText(/\/current london/i, msg => {
+  const slug = currentSlug.london;
+  fetchMarket(slug).then(data => {
+    if (!data.outcomes) return bot.sendMessage(msg.chat.id, "No market found for London today.");
+    const top3 = getTop3(data.outcomes);
+    bot.sendMessage(msg.chat.id, `[LONDON] ${top3.join(", ")}`);
+  });
+});
+bot.onText(/\/current nyc/i, msg => {
+  const slug = currentSlug.nyc;
+  fetchMarket(slug).then(data => {
+    if (!data.outcomes) return bot.sendMessage(msg.chat.id, "No market found for NYC today.");
+    const top3 = getTop3(data.outcomes);
+    bot.sendMessage(msg.chat.id, `[NYC] ${top3.join(", ")}`);
+  });
+});
+
+// /resolve command
+bot.onText(/\/resolve/i, msg => {
+  let messages = [];
+  ["london", "nyc"].forEach(async station => {
+    const slug = currentSlug[station];
+    const data = await fetchMarket(slug);
+    if (data.resolvedOutcome) {
+      messages.push(`✅ [${station.toUpperCase()}] ${data.endDate.slice(0,10)}: ${data.resolvedOutcome.name}`);
+    } else {
+      messages.push(`[${station.toUpperCase()}] Market not yet resolved`);
+    }
+    if (messages.length === 2) bot.sendMessage(msg.chat.id, messages.join("\n"));
+  });
+});
+
+// /streak commands (placeholder, implement your 1-2 week tracking logic)
+bot.onText(/\/streak london/i, msg => {
+  bot.sendMessage(msg.chat.id, "Streak data for London: (functionality to be implemented)");
+});
+bot.onText(/\/streak nyc/i, msg => {
+  bot.sendMessage(msg.chat.id, "Streak data for NYC: (functionality to be implemented)");
+});
+
+// /help command
+bot.onText(/\/help/i, msg => {
+  bot.sendMessage(msg.chat.id, `Available commands:
+/alert london - start tracking London
+/alert nyc - start tracking NYC
+/stop london - stop tracking London
+/stop nyc - stop tracking NYC
+/current london - show current top 3 London options
+/current nyc - show current top 3 NYC options
+/resolve - show resolved outcome
+/streak london - show streak for London
+/streak nyc - show streak for NYC
+/help - show this help`);
+});
+    [{ text: "/current london" }, { text: "/current nyc" }],
